@@ -1,0 +1,192 @@
+# FILE: module-release.yml
+# DESCRIPTION: Reusable workflow — validate and SemVer-tag one OpenTofu/Terraform module.
+# VERSION: 0.1.0
+# AUTHORS: gh-platform
+
+name: module-release
+
+on:
+  workflow_call:
+    inputs:
+      module_name:
+        description: Module directory name at repo root (e.g. s3, vpc).
+        required: true
+        type: string
+      version:
+        description: Optional explicit SemVer X.Y.Z (skips commit-based bump).
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: If true, compute version and validate but do not create tag/release.
+        required: false
+        type: boolean
+        default: true
+      tofu_version:
+        description: OpenTofu version for fmt/validate.
+        required: false
+        type: string
+        default: "1.8.8"
+      create_github_release:
+        description: Create a GitHub Release for the tag (ignored when dry_run=true).
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      next_version:
+        description: Computed SemVer.
+        value: ${{ jobs.release.outputs.next_version }}
+      tag_name:
+        description: Tag name ({module}-vX.Y.Z).
+        value: ${{ jobs.release.outputs.tag_name }}
+      bump:
+        description: Bump kind.
+        value: ${{ jobs.release.outputs.bump }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout caller repository (modules)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate module_name
+        env:
+          MODULE_NAME: ${{ inputs.module_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${MODULE_NAME}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "::error::invalid module_name '${MODULE_NAME}'"
+            exit 1
+          fi
+          if [[ ! -d "${MODULE_NAME}" ]]; then
+            echo "::error::directory '${MODULE_NAME}' not found"
+            exit 1
+          fi
+          if [[ ! -f "${MODULE_NAME}/main.tf" && ! -f "${MODULE_NAME}/versions.tf" ]]; then
+            echo "::error::${MODULE_NAME} missing main.tf or versions.tf"
+            exit 1
+          fi
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: Format check
+        env:
+          MODULE_NAME: ${{ inputs.module_name }}
+        run: |
+          set -euo pipefail
+          tofu fmt -check -recursive "${MODULE_NAME}"
+
+      - name: Init and validate
+        env:
+          MODULE_NAME: ${{ inputs.module_name }}
+        run: |
+          set -euo pipefail
+          cd "${MODULE_NAME}"
+          tofu init -backend=false -input=false
+          tofu validate
+
+  release:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      next_version: ${{ steps.semver.outputs.next_version }}
+      tag_name: ${{ steps.semver.outputs.tag_name }}
+      bump: ${{ steps.semver.outputs.bump }}
+    steps:
+      - name: Checkout caller repository (modules)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve reusable workflow source repo/ref
+        id: wfsrc
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          # Example: owner/repo/.github/workflows/module-release.yml@refs/heads/main
+          wr="${WORKFLOW_REF}"
+          repo="${wr%%/.github/*}"
+          ref="${wr##*@}"
+          echo "repo=${repo}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout actions catalog (workflow definition repo)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ steps.wfsrc.outputs.repo }}
+          ref: ${{ steps.wfsrc.outputs.ref }}
+          path: .gh-platform-actions
+
+      - name: Calculate SemVer
+        id: semver
+        uses: ./.gh-platform-actions/actions/release/module-semver
+        with:
+          module_name: ${{ inputs.module_name }}
+          explicit_version: ${{ inputs.version }}
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry_run }}
+        env:
+          MODULE_NAME: ${{ inputs.module_name }}
+          NEXT_VERSION: ${{ steps.semver.outputs.next_version }}
+          TAG_NAME: ${{ steps.semver.outputs.tag_name }}
+          BUMP: ${{ steps.semver.outputs.bump }}
+        run: |
+          set -euo pipefail
+          echo "::notice::DRY RUN module=${MODULE_NAME} bump=${BUMP} next=${NEXT_VERSION} tag=${TAG_NAME}"
+          echo "No tag or GitHub Release created (dry_run=true)."
+
+      - name: Create annotated tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAG_NAME: ${{ steps.semver.outputs.tag_name }}
+          NEXT_VERSION: ${{ steps.semver.outputs.next_version }}
+          MODULE_NAME: ${{ inputs.module_name }}
+          BUMP: ${{ steps.semver.outputs.bump }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG_NAME}" -m "${MODULE_NAME} ${NEXT_VERSION} (${BUMP})"
+          git push origin "refs/tags/${TAG_NAME}"
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run && inputs.create_github_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.semver.outputs.tag_name }}
+          NEXT_VERSION: ${{ steps.semver.outputs.next_version }}
+          MODULE_NAME: ${{ inputs.module_name }}
+          BUMP: ${{ steps.semver.outputs.bump }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          notes="$(cat <<EOF
+          Module \`${MODULE_NAME}\` release \`${NEXT_VERSION}\` (bump: ${BUMP}).
+
+          Consume:
+
+          \`\`\`hcl
+          module \"${MODULE_NAME}\" {
+            source = \"git::https://github.com/${REPOSITORY}.git//${MODULE_NAME}?ref=${TAG_NAME}\"
+          }
+          \`\`\`
+          EOF
+          )"
+          gh release create "${TAG_NAME}" \
+            --title "${MODULE_NAME} ${NEXT_VERSION}" \
+            --notes "${notes}"

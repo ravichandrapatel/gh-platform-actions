@@ -1,0 +1,184 @@
+# FILE: action.yml
+# DESCRIPTION: Derive next SemVer for a single OpenTofu/Terraform module from conventional commits.
+# VERSION: 0.1.0
+# AUTHORS: gh-platform
+
+name: module-semver
+description: >-
+  Calculate the next SemVer for a module directory from conventional commits
+  since the last module tag ({module}-vX.Y.Z).
+author: gh-platform
+
+inputs:
+  module_name:
+    description: Module directory name (e.g. s3, vpc). Used as tag prefix.
+    required: true
+  explicit_version:
+    description: Optional override (X.Y.Z). When set, skips commit-based bump.
+    required: false
+    default: ""
+
+outputs:
+  current_version:
+    description: Version from the latest matching tag, or 0.0.0 if none.
+    value: ${{ steps.calc.outputs.current_version }}
+  next_version:
+    description: Next SemVer (without prefix).
+    value: ${{ steps.calc.outputs.next_version }}
+  tag_name:
+    description: Annotated tag to create ({module}-v{next_version}).
+    value: ${{ steps.calc.outputs.tag_name }}
+  bump:
+    description: major | minor | patch | explicit | initial
+    value: ${{ steps.calc.outputs.bump }}
+
+runs:
+  using: composite
+  steps:
+    - name: Calculate module SemVer
+      id: calc
+      shell: bash
+      env:
+        MODULE_NAME: ${{ inputs.module_name }}
+        EXPLICIT_VERSION: ${{ inputs.explicit_version }}
+      run: |
+        set -euo pipefail
+
+        module="${MODULE_NAME}"
+        if [[ ! "${module}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+          echo "::error::module_name must match ^[a-z0-9][a-z0-9-]*$ (got '${module}')"
+          exit 1
+        fi
+
+        if [[ ! -d "${module}" ]]; then
+          echo "::error::module directory '${module}' not found in workspace root"
+          exit 1
+        fi
+
+        if [[ -n "${EXPLICIT_VERSION}" ]]; then
+          if [[ ! "${EXPLICIT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::explicit_version must be X.Y.Z (got '${EXPLICIT_VERSION}')"
+            exit 1
+          fi
+          tag_name="${module}-v${EXPLICIT_VERSION}"
+          if git rev-parse "refs/tags/${tag_name}" >/dev/null 2>&1; then
+            echo "::error::tag ${tag_name} already exists"
+            exit 1
+          fi
+          {
+            echo "current_version=0.0.0"
+            echo "next_version=${EXPLICIT_VERSION}"
+            echo "tag_name=${tag_name}"
+            echo "bump=explicit"
+          } >> "${GITHUB_OUTPUT}"
+          echo "::notice::Using explicit version ${EXPLICIT_VERSION} → ${tag_name}"
+          exit 0
+        fi
+
+        # Latest tag for this module: {module}-vX.Y.Z
+        latest_tag="$(
+          git tag -l "${module}-v*" --sort=-v:refname | head -n1 || true
+        )"
+
+        if [[ -z "${latest_tag}" ]]; then
+          next="1.0.0"
+          tag_name="${module}-v${next}"
+          {
+            echo "current_version=0.0.0"
+            echo "next_version=${next}"
+            echo "tag_name=${tag_name}"
+            echo "bump=initial"
+          } >> "${GITHUB_OUTPUT}"
+          echo "::notice::No prior tags for ${module}; initial release ${tag_name}"
+          exit 0
+        fi
+
+        current="${latest_tag#${module}-v}"
+        if [[ ! "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::Could not parse SemVer from tag '${latest_tag}'"
+          exit 1
+        fi
+
+        major="$(echo "${current}" | cut -d. -f1)"
+        minor="$(echo "${current}" | cut -d. -f2)"
+        patch="$(echo "${current}" | cut -d. -f3)"
+
+        # Commits touching this module since last tag
+        mapfile -t subjects < <(
+          git log "${latest_tag}..HEAD" --pretty=format:%s -- "${module}" \
+            || true
+        )
+
+        if [[ "${#subjects[@]}" -eq 0 || -z "${subjects[0]:-}" ]]; then
+          echo "::error::No commits touching '${module}/' since ${latest_tag}. Nothing to release."
+          exit 1
+        fi
+
+        bump="none"
+        for subject in "${subjects[@]}"; do
+          # Strip optional ticket prefix: SCTASK123 / INC123 / DCDT-123 / optional colon
+          body="$(
+            printf '%s\n' "${subject}" \
+              | sed -E 's/^(sctask|inc|dcdt)[-]?[0-9]+[[:space:]]*:?[[:space:]]*//I'
+          )"
+
+          # Breaking: conventional ! or BREAKING CHANGE in subject
+          if [[ "${body}" =~ ^[a-z]+(\(.+\))?!: ]] || [[ "${body}" =~ BREAKING[[:space:]]CHANGE ]]; then
+            bump="major"
+            break
+          fi
+
+          type="$(
+            printf '%s\n' "${body}" \
+              | sed -nE 's/^([a-z]+)(\(.+\))?!?:[[:space:]].*/\1/p'
+          )"
+          case "${type}" in
+            feat)
+              if [[ "${bump}" != "major" ]]; then
+                bump="minor"
+              fi
+              ;;
+            fix|chore|perf)
+              if [[ "${bump}" == "none" ]]; then
+                bump="patch"
+              fi
+              ;;
+            docs|style|refactor|test|ci|build)
+              # no bump
+              ;;
+            *)
+              # ignore non-conventional subjects for bump selection
+              ;;
+          esac
+        done
+
+        case "${bump}" in
+          major)
+            next="$((major + 1)).0.0"
+            ;;
+          minor)
+            next="${major}.$((minor + 1)).0"
+            ;;
+          patch)
+            next="${major}.${minor}.$((patch + 1))"
+            ;;
+          *)
+            echo "::error::No SemVer-bumping conventional commits for '${module}' since ${latest_tag}."
+            echo "::error::Use feat: (minor), fix:/chore:/perf: (patch), or type!: / BREAKING CHANGE (major)."
+            exit 1
+            ;;
+        esac
+
+        tag_name="${module}-v${next}"
+        if git rev-parse "refs/tags/${tag_name}" >/dev/null 2>&1; then
+          echo "::error::Computed tag ${tag_name} already exists"
+          exit 1
+        fi
+
+        {
+          echo "current_version=${current}"
+          echo "next_version=${next}"
+          echo "tag_name=${tag_name}"
+          echo "bump=${bump}"
+        } >> "${GITHUB_OUTPUT}"
+        echo "::notice::${module}: ${current} → ${next} (${bump}) tag=${tag_name}"

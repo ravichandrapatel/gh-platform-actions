@@ -21,5 +21,9 @@ jobs:
           set -euo pipefail
           test -f actions/iac/commons/action.yml
           test -f actions/deploy/s3-bucket/action.yml
+          test -f actions/release/module-semver/action.yml
           test -f actions/iac/commons/readme.md
           test -f actions/deploy/s3-bucket/readme.md
+          test -f actions/release/module-semver/readme.md
+          test -f .github/workflows/module-release.yml
+          test -f docs/workflows/module-release.md
