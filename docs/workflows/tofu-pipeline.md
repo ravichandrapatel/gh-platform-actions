@@ -63,5 +63,4 @@ Override with input `policy_path` (still resolved inside this actions repo check
 
 ## Related
 
-- Legacy thin wrapper: [`.github/workflows/tofu-plan-apply.yml`](../../.github/workflows/tofu-plan-apply.yml)
-- Commons composite: [`actions/iac/commons`](../../actions/iac/commons/)
+- Policy pack: [`policies/conftest/terraform/`](../../policies/conftest/terraform/)

@@ -1,6 +1,6 @@
 # gh-platform-actions
 
-Reusable GitHub Actions and workflows for **gh-platform** (Actions layer + Commons).
+Reusable GitHub Actions and workflows for **gh-platform** (Actions layer).
 
 ## Related repos
 
@@ -12,11 +12,10 @@ Reusable GitHub Actions and workflows for **gh-platform** (Actions layer + Commo
 ## Layout
 
 ```text
-actions/iac/commons/              # OpenTofu runner (plan default)
-actions/deploy/<name>/            # thin resource wrappers
 .github/workflows/tofu-pipeline.yml   # reusable: Checkov → plan → Conftest → gated apply
-policies/conftest/terraform/      # OPA/Conftest pack for all gh-platform-modules resources
-docs/                             # branching, rulesets, workflow docs
+policies/conftest/terraform/          # OPA/Conftest pack for all gh-platform-modules resources
+actions/                              # reserved for future composite actions
+docs/                                 # branching, rulesets, workflow docs
 ```
 
 Policy details: [policies/conftest/terraform/README.md](policies/conftest/terraform/README.md).
@@ -47,8 +46,8 @@ See [docs/BRANCHING.md](docs/BRANCHING.md). Apply [docs/GITHUB_RULESETS.md](docs
 
 ## Pinning
 
-Control plane and callers must pin:
+Callers must pin the reusable workflow to a 40-character commit SHA:
 
 ```yaml
-uses: OWNER/gh-platform-actions/actions/deploy/s3-bucket@<40-char-sha>
+uses: ravichandrapatel/gh-platform-actions/.github/workflows/tofu-pipeline.yml@<40-char-sha>
 ```
