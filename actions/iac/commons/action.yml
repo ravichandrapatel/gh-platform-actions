@@ -1,0 +1,138 @@
+name: gh-platform-commons
+description: Run OpenTofu against a pinned gh-platform-modules ref (plan by default).
+author: gh-platform
+
+inputs:
+  modules_repository:
+    description: GitHub repository for modules (OWNER/gh-platform-modules).
+    required: true
+  modules_ref:
+    description: Immutable modules git ref (annotated tag preferred). Floating main is rejected.
+    required: true
+  module_path:
+    description: Path inside modules repo (e.g. examples/s3-bucket or a root module path).
+    required: true
+  command:
+    description: OpenTofu command to run.
+    required: false
+    default: plan
+  confirm_apply:
+    description: Must be the literal string APPLY to run apply or destroy.
+    required: false
+    default: ""
+  working_directory:
+    description: Checkout path for modules repo.
+    required: false
+    default: .gh-platform-modules
+  tofu_version:
+    description: OpenTofu version.
+    required: false
+    default: "1.8.8"
+  tfvars_file:
+    description: Optional tfvars file path relative to module_path.
+    required: false
+    default: ""
+  aws_region:
+    description: AWS region (exported as AWS_REGION).
+    required: false
+    default: us-east-1
+
+outputs:
+  command:
+    description: Command that was executed.
+    value: ${{ steps.gate.outputs.command }}
+
+runs:
+  using: composite
+  steps:
+    - name: Reject floating modules ref
+      shell: bash
+      env:
+        MODULES_REF: ${{ inputs.modules_ref }}
+      run: |
+        set -euo pipefail
+        case "${MODULES_REF}" in
+          main|master|HEAD|latest|"")
+            echo "::error::modules_ref must be an immutable tag or SHA (got '${MODULES_REF}')"
+            exit 1
+            ;;
+        esac
+
+    - name: Gate apply/destroy
+      id: gate
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+      run: |
+        set -euo pipefail
+        cmd="${COMMAND}"
+        case "${cmd}" in
+          plan|init|validate)
+            ;;
+          apply|destroy)
+            if [[ "${CONFIRM_APPLY}" != "APPLY" ]]; then
+              echo "::error::command=${cmd} requires confirm_apply=APPLY"
+              exit 1
+            fi
+            ;;
+          *)
+            echo "::error::unsupported command '${cmd}'"
+            exit 1
+            ;;
+        esac
+        echo "command=${cmd}" >> "${GITHUB_OUTPUT}"
+
+    - name: Checkout modules
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: ${{ inputs.modules_repository }}
+        ref: ${{ inputs.modules_ref }}
+        path: ${{ inputs.working_directory }}
+
+    - name: Setup OpenTofu
+      uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+      with:
+        tofu_version: ${{ inputs.tofu_version }}
+
+    - name: OpenTofu init
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}/${{ inputs.module_path }}
+      env:
+        AWS_REGION: ${{ inputs.aws_region }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+      run: |
+        set -euo pipefail
+        tofu init -input=false
+
+    - name: OpenTofu run
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}/${{ inputs.module_path }}
+      env:
+        AWS_REGION: ${{ inputs.aws_region }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        COMMAND: ${{ steps.gate.outputs.command }}
+        TFVARS_FILE: ${{ inputs.tfvars_file }}
+      run: |
+        set -euo pipefail
+        args=()
+        if [[ -n "${TFVARS_FILE}" ]]; then
+          args+=(-var-file="${TFVARS_FILE}")
+        fi
+        case "${COMMAND}" in
+          init)
+            echo "init already completed"
+            ;;
+          validate)
+            tofu validate
+            ;;
+          plan)
+            tofu plan -input=false -out=tfplan "${args[@]}"
+            ;;
+          apply)
+            tofu apply -input=false -auto-approve "${args[@]}"
+            ;;
+          destroy)
+            tofu destroy -input=false -auto-approve "${args[@]}"
+            ;;
+        esac
