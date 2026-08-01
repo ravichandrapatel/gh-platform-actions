@@ -12,10 +12,31 @@ Reusable GitHub Actions and workflows for **gh-platform** (Actions layer + Commo
 ## Layout
 
 ```text
-actions/iac/commons/     # OpenTofu runner (plan default)
-actions/deploy/<name>/   # thin resource wrappers
-.github/workflows/       # reusable + CI workflows
-docs/                    # branching + rulesets
+actions/iac/commons/              # OpenTofu runner (plan default)
+actions/deploy/<name>/            # thin resource wrappers
+.github/workflows/tofu-pipeline.yml   # reusable: Checkov → plan → Conftest → gated apply
+policies/conftest/terraform/      # OPA/Conftest policies evaluated against plan JSON
+docs/                             # branching, rulesets, workflow docs
+```
+
+## Reusable: tofu-pipeline
+
+Checkout → Checkov → `tofu init/plan` → Conftest (OPA) on plan JSON → gated `apply`.
+
+See [docs/workflows/tofu-pipeline.md](docs/workflows/tofu-pipeline.md).
+
+```yaml
+jobs:
+  tofu:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ravichandrapatel/gh-platform-actions/.github/workflows/tofu-pipeline.yml@<40-char-sha>
+    with:
+      working_directory: path/to/stack
+      environment: nonprod
+      aws_role_arn: arn:aws:iam::123456789012:role/gha-opentofu
+      command: plan
 ```
 
 ## Security branching
