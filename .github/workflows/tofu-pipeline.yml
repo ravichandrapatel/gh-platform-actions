@@ -1,0 +1,223 @@
+# FILE_NAME: tofu-pipeline.yml
+# DESCRIPTION: Reusable OpenTofu pipeline — checkout, Checkov, plan, Conftest/OPA, gated apply.
+# VERSION: 0.1.0
+# AUTHORS: gh-platform
+
+name: tofu-pipeline
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Path in the caller repo that contains the OpenTofu root module.
+        required: false
+        type: string
+        default: "."
+      command:
+        description: plan (default) or apply. apply requires confirm_apply=APPLY.
+        required: false
+        type: string
+        default: plan
+      confirm_apply:
+        description: Must be the literal string APPLY to run apply or destroy.
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: GitHub Environment name (required reviewers / protection rules).
+        required: true
+        type: string
+      aws_role_arn:
+        description: IAM role ARN for OIDC assume-role.
+        required: true
+        type: string
+      aws_region:
+        description: AWS region.
+        required: false
+        type: string
+        default: us-east-1
+      tofu_version:
+        description: OpenTofu version.
+        required: false
+        type: string
+        default: "1.10.10"
+      tfvars_file:
+        description: Optional tfvars path relative to working_directory.
+        required: false
+        type: string
+        default: ""
+      checkov_soft_fail:
+        description: If true, Checkov findings do not fail the job.
+        required: false
+        type: boolean
+        default: false
+      conftest_version:
+        description: Conftest release version (without leading v).
+        required: false
+        type: string
+        default: "0.68.2"
+      policy_path:
+        description: Policy directory inside this actions repo.
+        required: false
+        type: string
+        default: policies/conftest/terraform
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Resolve policy pack repository
+        id: policy_repo
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          # workflow_ref: OWNER/REPO/.github/workflows/file.yml@ref
+          repo="${WORKFLOW_REF%%/.github/*}"
+          if [[ -z "${repo}" || "${repo}" == "${WORKFLOW_REF}" ]]; then
+            echo "::error::unable to parse actions repository from github.workflow_ref=${WORKFLOW_REF}"
+            exit 1
+          fi
+          echo "repository=${repo}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout policy pack (this actions repo)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ steps.policy_repo.outputs.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .gh-platform-actions
+          sparse-checkout: |
+            policies
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: Checkov (Terraform/OpenTofu)
+        uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf # v12.1347.0
+        with:
+          directory: ${{ inputs.working_directory }}
+          framework: terraform
+          soft_fail: ${{ inputs.checkov_soft_fail }}
+          output_format: cli
+
+      - name: Install Conftest (checksum-verified)
+        env:
+          CONFTEST_VERSION: ${{ inputs.conftest_version }}
+          # sha256 of conftest_0.68.2_Linux_x86_64.tar.gz
+          CONFTEST_SHA256: e8144c6d6d2ae0260b869caa60c7c262a1f95ac63ec1e5d2fb19be452d606347
+        run: |
+          set -euo pipefail
+          if [[ "${CONFTEST_VERSION}" != "0.68.2" ]]; then
+            echo "::error::pin mismatch: update CONFTEST_SHA256 when changing conftest_version (got ${CONFTEST_VERSION})"
+            exit 1
+          fi
+          asset="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          url="https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${asset}"
+          curl -fsSL --retry 3 -o "/tmp/${asset}" "${url}"
+          echo "${CONFTEST_SHA256}  /tmp/${asset}" | sha256sum -c -
+          tar -xzf "/tmp/${asset}" -C /tmp conftest
+          sudo install -m 0755 /tmp/conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Gate command
+        id: gate
+        env:
+          COMMAND: ${{ inputs.command }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        run: |
+          set -euo pipefail
+          cmd="${COMMAND}"
+          case "${cmd}" in
+            plan) ;;
+            apply|destroy)
+              if [[ "${CONFIRM_APPLY}" != "APPLY" ]]; then
+                echo "::error::command=${cmd} requires confirm_apply=APPLY"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unsupported command '${cmd}' (use plan|apply|destroy)"
+              exit 1
+              ;;
+          esac
+          echo "command=${cmd}" >> "${GITHUB_OUTPUT}"
+
+      - name: OpenTofu init
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          tofu init -input=false
+
+      - name: OpenTofu plan
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          TFVARS_FILE: ${{ inputs.tfvars_file }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "${TFVARS_FILE}" ]]; then
+            args+=(-var-file="${TFVARS_FILE}")
+          fi
+          tofu plan -input=false -out=tfplan "${args[@]}"
+          tofu show -json tfplan > tfplan.json
+
+      - name: Conftest (OPA policies on plan JSON)
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          POLICY_PATH: ${{ inputs.policy_path }}
+        run: |
+          set -euo pipefail
+          policy_dir="${GITHUB_WORKSPACE}/.gh-platform-actions/${POLICY_PATH}"
+          if [[ ! -d "${policy_dir}" ]]; then
+            echo "::error::policy directory not found: ${policy_dir}"
+            exit 1
+          fi
+          conftest test tfplan.json -p "${policy_dir}" --all-namespaces
+
+      - name: OpenTofu apply
+        if: steps.gate.outputs.command == 'apply'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          tofu apply -input=false -auto-approve tfplan
+
+      - name: OpenTofu destroy
+        if: steps.gate.outputs.command == 'destroy'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          TFVARS_FILE: ${{ inputs.tfvars_file }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "${TFVARS_FILE}" ]]; then
+            args+=(-var-file="${TFVARS_FILE}")
+          fi
+          tofu destroy -input=false -auto-approve "${args[@]}"
