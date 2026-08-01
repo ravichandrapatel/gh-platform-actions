@@ -1,6 +1,6 @@
 # FILE_NAME: tofu-pipeline.yml
-# DESCRIPTION: Reusable OpenTofu pipeline — checkout, Checkov, plan, Conftest/OPA, gated apply.
-# VERSION: 0.1.0
+# DESCRIPTION: Multi-stage reusable OpenTofu pipeline — validate → plan+OPA → gated apply.
+# VERSION: 0.2.0
 # AUTHORS: gh-platform
 
 name: tofu-pipeline
@@ -24,7 +24,7 @@ on:
         type: string
         default: ""
       environment:
-        description: GitHub Environment name (required reviewers / protection rules).
+        description: GitHub Environment for the apply stage only (reviewers / protection).
         required: true
         type: string
       aws_role_arn:
@@ -61,14 +61,23 @@ on:
         required: false
         type: string
         default: policies/conftest/terraform
+    secrets:
+      modules_git_token:
+        description: >-
+          Token with contents:read on private module repos (e.g. gh-platform-modules).
+          Enables git module download during tofu init. Prefer a fine-scoped PAT or App
+          token; caller GITHUB_TOKEN cannot read other private repos by default.
+        required: false
 
 permissions:
   contents: read
 
 jobs:
-  pipeline:
+  # ---------------------------------------------------------------------------
+  # Stage 1 — validate: fmt, init (modules/providers), validate, Checkov
+  # ---------------------------------------------------------------------------
+  validate:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       id-token: write
@@ -76,13 +85,91 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Configure git auth for module download
+        env:
+          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+        run: |
+          set -euo pipefail
+          token="${MODULES_GIT_TOKEN:-}"
+          if [[ -z "${token}" ]]; then
+            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "git@github.com:"
+          echo "Configured git HTTPS rewrite for module download"
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: OpenTofu fmt -check
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          tofu fmt -check -recursive -diff
+
+      - name: OpenTofu init (modules/providers, no backend)
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          # -backend=false: download modules + providers without AWS state access
+          tofu init -input=false -backend=false
+
+      - name: OpenTofu validate
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          tofu validate
+
+      - name: Checkov (Terraform/OpenTofu)
+        uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf # v12.1347.0
+        with:
+          directory: ${{ inputs.working_directory }}
+          framework: terraform
+          soft_fail: ${{ inputs.checkov_soft_fail }}
+          output_format: cli
+
+  # ---------------------------------------------------------------------------
+  # Stage 2 — plan: full init, plan, Conftest/OPA on plan JSON
+  # ---------------------------------------------------------------------------
+  plan:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure git auth for module download
+        env:
+          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+        run: |
+          set -euo pipefail
+          token="${MODULES_GIT_TOKEN:-}"
+          if [[ -z "${token}" ]]; then
+            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "git@github.com:"
+          echo "Configured git HTTPS rewrite for module download"
+
       - name: Resolve policy pack repository
         id: policy_repo
         env:
           WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
           set -euo pipefail
-          # workflow_ref: OWNER/REPO/.github/workflows/file.yml@ref
           repo="${WORKFLOW_REF%%/.github/*}"
           if [[ -z "${repo}" || "${repo}" == "${WORKFLOW_REF}" ]]; then
             echo "::error::unable to parse actions repository from github.workflow_ref=${WORKFLOW_REF}"
@@ -110,18 +197,9 @@ jobs:
         with:
           tofu_version: ${{ inputs.tofu_version }}
 
-      - name: Checkov (Terraform/OpenTofu)
-        uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf # v12.1347.0
-        with:
-          directory: ${{ inputs.working_directory }}
-          framework: terraform
-          soft_fail: ${{ inputs.checkov_soft_fail }}
-          output_format: cli
-
       - name: Install Conftest (checksum-verified)
         env:
           CONFTEST_VERSION: ${{ inputs.conftest_version }}
-          # sha256 of conftest_0.68.2_Linux_x86_64.tar.gz
           CONFTEST_SHA256: e8144c6d6d2ae0260b869caa60c7c262a1f95ac63ec1e5d2fb19be452d606347
         run: |
           set -euo pipefail
@@ -137,28 +215,17 @@ jobs:
           sudo install -m 0755 /tmp/conftest /usr/local/bin/conftest
           conftest --version
 
-      - name: Gate command
-        id: gate
+      - name: Artifact name
+        id: art
         env:
-          COMMAND: ${{ inputs.command }}
-          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+          WD: ${{ inputs.working_directory }}
         run: |
           set -euo pipefail
-          cmd="${COMMAND}"
-          case "${cmd}" in
-            plan) ;;
-            apply|destroy)
-              if [[ "${CONFIRM_APPLY}" != "APPLY" ]]; then
-                echo "::error::command=${cmd} requires confirm_apply=APPLY"
-                exit 1
-              fi
-              ;;
-            *)
-              echo "::error::unsupported command '${cmd}' (use plan|apply|destroy)"
-              exit 1
-              ;;
-          esac
-          echo "command=${cmd}" >> "${GITHUB_OUTPUT}"
+          name="$(printf '%s' "${WD}" | tr '/.' '-' | sed 's/^-*//;s/-*$//')"
+          if [[ -z "${name}" || "${name}" == "." ]]; then
+            name="root"
+          fi
+          echo "name=tfplan-${name}" >> "${GITHUB_OUTPUT}"
 
       - name: OpenTofu init
         working-directory: ${{ inputs.working_directory }}
@@ -184,7 +251,7 @@ jobs:
           tofu plan -input=false -out=tfplan "${args[@]}"
           tofu show -json tfplan > tfplan.json
 
-      - name: Conftest (OPA policies on plan JSON)
+      - name: Conftest / OPA (policies on plan JSON)
         working-directory: ${{ inputs.working_directory }}
         env:
           POLICY_PATH: ${{ inputs.policy_path }}
@@ -197,8 +264,86 @@ jobs:
           fi
           conftest test tfplan.json -p "${policy_dir}" --all-namespaces
 
+      - name: Upload plan artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.art.outputs.name }}
+          path: |
+            ${{ inputs.working_directory }}/tfplan
+            ${{ inputs.working_directory }}/tfplan.json
+          if-no-files-found: error
+          retention-days: 5
+
+  # ---------------------------------------------------------------------------
+  # Stage 3 — apply: Environment-gated; uses plan artifact from stage 2
+  # ---------------------------------------------------------------------------
+  apply:
+    needs: [validate, plan]
+    if: inputs.command == 'apply' && inputs.confirm_apply == 'APPLY'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure git auth for module download
+        env:
+          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+        run: |
+          set -euo pipefail
+          token="${MODULES_GIT_TOKEN:-}"
+          if [[ -z "${token}" ]]; then
+            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "git@github.com:"
+          echo "Configured git HTTPS rewrite for module download"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: Artifact name
+        id: art
+        env:
+          WD: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          name="$(printf '%s' "${WD}" | tr '/.' '-' | sed 's/^-*//;s/-*$//')"
+          if [[ -z "${name}" || "${name}" == "." ]]; then
+            name="root"
+          fi
+          echo "name=tfplan-${name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download plan artifacts
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: ${{ steps.art.outputs.name }}
+          path: ${{ inputs.working_directory }}
+
+      - name: OpenTofu init
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          tofu init -input=false
+
       - name: OpenTofu apply
-        if: steps.gate.outputs.command == 'apply'
         working-directory: ${{ inputs.working_directory }}
         env:
           AWS_REGION: ${{ inputs.aws_region }}
@@ -207,8 +352,54 @@ jobs:
           set -euo pipefail
           tofu apply -input=false -auto-approve tfplan
 
+  destroy:
+    needs: validate
+    if: inputs.command == 'destroy' && inputs.confirm_apply == 'APPLY'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure git auth for module download
+        env:
+          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+        run: |
+          set -euo pipefail
+          token="${MODULES_GIT_TOKEN:-}"
+          if [[ -z "${token}" ]]; then
+            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "git@github.com:"
+          echo "Configured git HTTPS rewrite for module download"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: OpenTofu init
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          tofu init -input=false
+
       - name: OpenTofu destroy
-        if: steps.gate.outputs.command == 'destroy'
         working-directory: ${{ inputs.working_directory }}
         env:
           AWS_REGION: ${{ inputs.aws_region }}

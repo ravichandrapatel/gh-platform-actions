@@ -1,16 +1,32 @@
 # tofu-pipeline (reusable workflow)
 
-Secure OpenTofu delivery pipeline for caller repositories.
+Secure multi-stage OpenTofu delivery pipeline for caller repositories.
 
-## Pipeline
+## Stages
 
-1. Checkout caller repo
-2. Checkout this actions repo (policy pack at `github.workflow_sha`)
-3. AWS credentials via OIDC
-4. **Checkov** (Terraform framework) on `working_directory`
-5. `tofu init` + `tofu plan` → `tfplan.json`
-6. **Conftest / OPA** against `policies/conftest/terraform`
-7. `tofu apply` / `destroy` only when gated
+| Job | When | What |
+| --- | --- | --- |
+| `validate` | always | `tofu fmt -check` → `tofu init -backend=false` (module/provider download) → `tofu validate` → **Checkov** |
+| `plan` | after validate | AWS OIDC → `tofu init` → `tofu plan` → **Conftest/OPA** on `tfplan.json` → upload plan artifact |
+| `apply` | `command=apply` + `confirm_apply=APPLY` | GitHub **Environment** gate → download plan → `tofu apply` |
+| `destroy` | `command=destroy` + `confirm_apply=APPLY` | Environment gate → `tofu destroy` (no plan artifact) |
+
+Environment protection (required reviewers) applies **only** to `apply` / `destroy`, so PR plans are not blocked by approvals.
+
+OpenTofu CLI is used (`tofu`); it is Terraform-compatible (`fmt` / `validate` / `plan` / `apply`).
+
+## Module download
+
+Private git modules (e.g. `git::https://github.com/ORG/gh-platform-modules.git//s3?ref=…`) need a token that can `contents:read` those repos. Pass:
+
+```yaml
+secrets:
+  modules_git_token: ${{ secrets.MODULES_GIT_TOKEN }}
+```
+
+`GITHUB_TOKEN` from the caller **cannot** read other private repositories by default. Use a fine-scoped PAT or GitHub App installation token stored as `MODULES_GIT_TOKEN` on the workload repo.
+
+The pipeline configures git `url.insteadOf` rewrites so HTTPS and SSH-style GitHub module sources authenticate with that token.
 
 ## Apply / destroy gate
 
@@ -18,9 +34,9 @@ All of the following are required for mutating commands:
 
 - `command: apply` (or `destroy`)
 - `confirm_apply: APPLY`
-- GitHub `environment` (attach required reviewers in repo settings)
+- GitHub `environment` on the apply/destroy job (attach required reviewers in repo settings)
 
-Pull requests should call with `command: plan` only.
+Pull requests should call with `command: plan` only (runs `validate` + `plan`).
 
 ## Caller example
 
@@ -45,6 +61,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: write
     uses: ravichandrapatel/gh-platform-actions/.github/workflows/tofu-pipeline.yml@<40-char-sha>
     with:
       working_directory: path/to/stack
@@ -52,15 +69,13 @@ jobs:
       aws_role_arn: arn:aws:iam::123456789012:role/gha-opentofu
       command: ${{ github.event_name == 'workflow_dispatch' && inputs.command || 'plan' }}
       confirm_apply: ${{ github.event_name == 'workflow_dispatch' && inputs.command == 'apply' && 'APPLY' || '' }}
+    secrets:
+      modules_git_token: ${{ secrets.MODULES_GIT_TOKEN }}
 ```
 
 ## Custom policies
 
-Rego pack: [`policies/conftest/terraform/`](../../policies/conftest/terraform/) — covers all `gh-platform-modules` resource types (S3, VPC/SG, IAM/SSO, compute, RDS, edge, Cognito, org, …).  
+Rego pack: [`policies/conftest/terraform/`](../../policies/conftest/terraform/) — covers all `gh-platform-modules` resource types.  
 See [`policies/conftest/terraform/README.md`](../../policies/conftest/terraform/README.md) and [MODULE_COVERAGE.md](../../policies/conftest/terraform/MODULE_COVERAGE.md).
 
 Override with input `policy_path` (still resolved inside this actions repo checkout).
-
-## Related
-
-- Policy pack: [`policies/conftest/terraform/`](../../policies/conftest/terraform/)
