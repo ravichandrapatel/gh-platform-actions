@@ -56,16 +56,10 @@ jobs:
 
 ## Custom policies
 
-Rego files live in [`policies/conftest/terraform/`](../../policies/conftest/terraform/).  
+Rego pack: [`policies/conftest/terraform/`](../../policies/conftest/terraform/) — covers all `gh-platform-modules` resource types (S3, VPC/SG, IAM/SSO, compute, RDS, edge, Cognito, org, …).  
+See [`policies/conftest/terraform/README.md`](../../policies/conftest/terraform/README.md) and [MODULE_COVERAGE.md](../../policies/conftest/terraform/MODULE_COVERAGE.md).
+
 Override with input `policy_path` (still resolved inside this actions repo checkout).
-
-Starter policies:
-
-| File | Intent |
-| --- | --- |
-| `s3_encryption.rego` | S3 buckets need SSE configuration in-plan |
-| `public_ingress.rego` | No SSH/RDP open to the world |
-| `required_tags.rego` | `Environment` + `ManagedBy` on common resources |
 
 ## Related
 

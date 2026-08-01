@@ -15,9 +15,11 @@ Reusable GitHub Actions and workflows for **gh-platform** (Actions layer + Commo
 actions/iac/commons/              # OpenTofu runner (plan default)
 actions/deploy/<name>/            # thin resource wrappers
 .github/workflows/tofu-pipeline.yml   # reusable: Checkov → plan → Conftest → gated apply
-policies/conftest/terraform/      # OPA/Conftest policies evaluated against plan JSON
+policies/conftest/terraform/      # OPA/Conftest pack for all gh-platform-modules resources
 docs/                             # branching, rulesets, workflow docs
 ```
+
+Policy details: [policies/conftest/terraform/README.md](policies/conftest/terraform/README.md).
 
 ## Reusable: tofu-pipeline
 
