@@ -2,7 +2,10 @@
 
 **Actions / policy layer** for gh-platform: reusable GitHub workflows that run secure OpenTofu delivery for caller (workload) repositories.
 
-Primary deliverable: **`tofu-pipeline`** — multi-stage **validate → plan+OPA → gated apply**.
+Primary deliverables:
+
+- **`tofu-pipeline`** — multi-stage **validate → plan+OPA → gated apply**
+- **`drift-reconcile`** — scheduled drift detect → Drift Report issue → optional non-destroy stamp PR
 
 ## Related repos
 
@@ -15,10 +18,12 @@ Primary deliverable: **`tofu-pipeline`** — multi-stage **validate → plan+OPA
 ## Layout
 
 ```text
-.github/workflows/tofu-pipeline.yml   # reusable: validate → plan+OPA → gated apply
-policies/conftest/terraform/          # OPA/Conftest pack for all gh-platform-modules resources
-actions/                              # reserved for future composite actions
-docs/                                 # branching, rulesets, workflow docs
+.github/workflows/tofu-pipeline.yml     # reusable: validate → plan+OPA → gated apply
+.github/workflows/drift-reconcile.yml   # reusable: drift report + optional stamp PR
+scripts/drift_reconcile.py              # classifier / issue / stamp PR
+policies/conftest/terraform/            # OPA/Conftest pack for module resources
+policies/conftest/terraform-drift/      # deny destroy on drift/* PRs
+docs/                                   # branching, rulesets, workflow docs
 ```
 
 Policy details: [policies/conftest/terraform/README.md](policies/conftest/terraform/README.md).
@@ -34,6 +39,13 @@ Policy details: [policies/conftest/terraform/README.md](policies/conftest/terraf
 Pass `secrets.modules_git_token` so private modules can be downloaded during `tofu init`.
 
 See [docs/workflows/tofu-pipeline.md](docs/workflows/tofu-pipeline.md).
+
+## Reusable: drift-reconcile
+
+Workload-owned cron/dispatch. Classifies each `stacks/*` plan as clean / safe / destroy.
+Destroy never gets a stamp PR. Dev may set `open_reconcile_pr: true`; prod should stay `false`.
+
+See [docs/workflows/drift-reconcile.md](docs/workflows/drift-reconcile.md).
 
 ```yaml
 jobs:

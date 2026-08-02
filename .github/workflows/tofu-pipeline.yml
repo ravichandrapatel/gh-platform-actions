@@ -264,6 +264,19 @@ jobs:
           fi
           conftest test tfplan.json -p "${policy_dir}" --all-namespaces
 
+      # Drift stamp PRs (branch drift/*) must never apply deletes — defense in depth beyond classifier.
+      - name: Conftest deny destroy on drift reconcile PRs
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'drift/')
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          policy_dir="${GITHUB_WORKSPACE}/.gh-platform-actions/policies/conftest/terraform-drift"
+          if [[ ! -d "${policy_dir}" ]]; then
+            echo "::error::drift policy directory not found: ${policy_dir}"
+            exit 1
+          fi
+          conftest test tfplan.json -p "${policy_dir}" --all-namespaces
+
       - name: Upload plan artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
