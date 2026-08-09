@@ -1,6 +1,6 @@
 # FILE_NAME: tofu-pipeline.yml
 # DESCRIPTION: Multi-stage reusable OpenTofu pipeline — validate → plan+OPA → gated apply.
-# VERSION: 0.2.0
+# VERSION: 0.3.0
 # AUTHORS: gh-platform
 
 name: tofu-pipeline
@@ -61,12 +61,30 @@ on:
         required: false
         type: string
         default: policies/conftest/terraform
+      control_app_client_id:
+        description: >-
+          GitHub App Client ID used with control_app_private_key to mint a short-lived
+          token scoped to modules_git_repository for private module download.
+        required: false
+        type: string
+        default: ""
+      modules_git_repository:
+        description: >-
+          owner/name of the private modules repo (e.g. org/gh-platform-modules).
+          Required when using control_app_client_id mint.
+        required: false
+        type: string
+        default: ""
     secrets:
+      control_app_private_key:
+        description: >-
+          GitHub App private key (PEM). Used with control_app_client_id to mint a
+          short-lived installation token for modules_git_repository.
+        required: false
       modules_git_token:
         description: >-
-          Token with contents:read on private module repos (e.g. gh-platform-modules).
-          Enables git module download during tofu init. Prefer a fine-scoped PAT or App
-          token; caller GITHUB_TOKEN cannot read other private repos by default.
+          Optional PAT fallback with contents:read on private module repos.
+          Prefer control_app_* + modules_git_repository (GitHub App mint).
         required: false
 
 permissions:
@@ -85,14 +103,34 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Resolve modules repo scope
+        id: modules-scope
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        env:
+          MODULES_GIT_REPOSITORY: ${{ inputs.modules_git_repository }}
+        run: |
+          set -euo pipefail
+          echo "owner=${MODULES_GIT_REPOSITORY%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${MODULES_GIT_REPOSITORY##*/}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint GitHub App token for modules
+        id: modules-app
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.control_app_client_id }}
+          private-key: ${{ secrets.control_app_private_key }}
+          owner: ${{ steps.modules-scope.outputs.owner }}
+          repositories: ${{ steps.modules-scope.outputs.repo }}
+
       - name: Configure git auth for module download
         env:
-          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+          MODULES_GIT_TOKEN: ${{ steps.modules-app.outputs.token || secrets.modules_git_token }}
         run: |
           set -euo pipefail
           token="${MODULES_GIT_TOKEN:-}"
           if [[ -z "${token}" ]]; then
-            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            echo "WARN: no modules token (App mint or modules_git_token) — private git modules will fail to download"
             exit 0
           fi
           git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
@@ -149,14 +187,34 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Resolve modules repo scope
+        id: modules-scope
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        env:
+          MODULES_GIT_REPOSITORY: ${{ inputs.modules_git_repository }}
+        run: |
+          set -euo pipefail
+          echo "owner=${MODULES_GIT_REPOSITORY%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${MODULES_GIT_REPOSITORY##*/}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint GitHub App token for modules
+        id: modules-app
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.control_app_client_id }}
+          private-key: ${{ secrets.control_app_private_key }}
+          owner: ${{ steps.modules-scope.outputs.owner }}
+          repositories: ${{ steps.modules-scope.outputs.repo }}
+
       - name: Configure git auth for module download
         env:
-          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+          MODULES_GIT_TOKEN: ${{ steps.modules-app.outputs.token || secrets.modules_git_token }}
         run: |
           set -euo pipefail
           token="${MODULES_GIT_TOKEN:-}"
           if [[ -z "${token}" ]]; then
-            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            echo "WARN: no modules token (App mint or modules_git_token) — private git modules will fail to download"
             exit 0
           fi
           git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
@@ -290,14 +348,34 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Resolve modules repo scope
+        id: modules-scope
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        env:
+          MODULES_GIT_REPOSITORY: ${{ inputs.modules_git_repository }}
+        run: |
+          set -euo pipefail
+          echo "owner=${MODULES_GIT_REPOSITORY%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${MODULES_GIT_REPOSITORY##*/}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint GitHub App token for modules
+        id: modules-app
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.control_app_client_id }}
+          private-key: ${{ secrets.control_app_private_key }}
+          owner: ${{ steps.modules-scope.outputs.owner }}
+          repositories: ${{ steps.modules-scope.outputs.repo }}
+
       - name: Configure git auth for module download
         env:
-          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+          MODULES_GIT_TOKEN: ${{ steps.modules-app.outputs.token || secrets.modules_git_token }}
         run: |
           set -euo pipefail
           token="${MODULES_GIT_TOKEN:-}"
           if [[ -z "${token}" ]]; then
-            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            echo "WARN: no modules token (App mint or modules_git_token) — private git modules will fail to download"
             exit 0
           fi
           git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
@@ -364,14 +442,34 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Resolve modules repo scope
+        id: modules-scope
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        env:
+          MODULES_GIT_REPOSITORY: ${{ inputs.modules_git_repository }}
+        run: |
+          set -euo pipefail
+          echo "owner=${MODULES_GIT_REPOSITORY%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${MODULES_GIT_REPOSITORY##*/}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint GitHub App token for modules
+        id: modules-app
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.control_app_client_id }}
+          private-key: ${{ secrets.control_app_private_key }}
+          owner: ${{ steps.modules-scope.outputs.owner }}
+          repositories: ${{ steps.modules-scope.outputs.repo }}
+
       - name: Configure git auth for module download
         env:
-          MODULES_GIT_TOKEN: ${{ secrets.modules_git_token }}
+          MODULES_GIT_TOKEN: ${{ steps.modules-app.outputs.token || secrets.modules_git_token }}
         run: |
           set -euo pipefail
           token="${MODULES_GIT_TOKEN:-}"
           if [[ -z "${token}" ]]; then
-            echo "WARN: modules_git_token not provided — private git modules will fail to download"
+            echo "WARN: no modules token (App mint or modules_git_token) — private git modules will fail to download"
             exit 0
           fi
           git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"

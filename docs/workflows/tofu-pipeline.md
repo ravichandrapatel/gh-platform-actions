@@ -17,16 +17,23 @@ OpenTofu CLI is used (`tofu`); it is Terraform-compatible (`fmt` / `validate` / 
 
 ## Module download
 
-Private git modules (e.g. `git::https://github.com/ORG/gh-platform-modules.git//s3?ref=…`) need a token that can `contents:read` those repos. Pass:
+Private git modules (e.g. `git::https://github.com/ORG/gh-platform-modules.git//s3?ref=…`) need a token that can `contents:read` those repos. Prefer minting a short-lived **GitHub App** installation token (same control App, scoped to the modules repo):
 
 ```yaml
+with:
+  control_app_client_id: ${{ vars.CONTROL_CLIENT_ID }}
+  modules_git_repository: ${{ vars.MODULES_GIT_REPOSITORY }}  # owner/gh-platform-modules
 secrets:
-  modules_git_token: ${{ secrets.MODULES_GIT_TOKEN }}
+  control_app_private_key: ${{ secrets.CONTROL_APP_PRIVATE_KEY }}
+  # optional PAT fallback:
+  # modules_git_token: ${{ secrets.MODULES_GIT_TOKEN }}
 ```
 
-`GITHUB_TOKEN` from the caller **cannot** read other private repositories by default. Use a fine-scoped PAT or GitHub App installation token stored as `MODULES_GIT_TOKEN` on the workload repo.
+The App must be installed on the **modules** repository (or All repos). EnvOps copies `CONTROL_CLIENT_ID` / `CONTROL_APP_PRIVATE_KEY` / `MODULES_GIT_REPOSITORY` onto new `infra-*` workloads.
 
-The pipeline configures git `url.insteadOf` rewrites so HTTPS and SSH-style GitHub module sources authenticate with that token.
+`GITHUB_TOKEN` from the caller **cannot** read other private repositories by default.
+
+The pipeline configures git `url.insteadOf` rewrites so HTTPS and SSH-style GitHub module sources authenticate with the minted (or fallback) token.
 
 ## Apply / destroy gate
 
@@ -67,10 +74,12 @@ jobs:
       working_directory: path/to/stack
       environment: nonprod
       aws_role_arn: arn:aws:iam::123456789012:role/gha-opentofu
+      control_app_client_id: ${{ vars.CONTROL_CLIENT_ID }}
+      modules_git_repository: ${{ vars.MODULES_GIT_REPOSITORY }}
       command: ${{ github.event_name == 'workflow_dispatch' && inputs.command || 'plan' }}
       confirm_apply: ${{ github.event_name == 'workflow_dispatch' && inputs.command == 'apply' && 'APPLY' || '' }}
     secrets:
-      modules_git_token: ${{ secrets.MODULES_GIT_TOKEN }}
+      control_app_private_key: ${{ secrets.CONTROL_APP_PRIVATE_KEY }}
 ```
 
 ## Custom policies

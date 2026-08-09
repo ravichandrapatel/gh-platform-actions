@@ -1,0 +1,229 @@
+# FILE_NAME: drift-reconcile.yml
+# DESCRIPTION: Reusable OpenTofu drift detect — report issue; optional stamp PR (no destroy).
+# VERSION: 0.1.0
+# AUTHORS: gh-platform
+
+name: drift-reconcile
+
+on:
+  workflow_call:
+    inputs:
+      stacks_root:
+        description: Directory containing stack roots (each child with .tf).
+        required: false
+        type: string
+        default: stacks
+      aws_role_arn:
+        description: IAM role ARN for OIDC assume-role (plan only).
+        required: true
+        type: string
+      aws_region:
+        description: AWS region.
+        required: false
+        type: string
+        default: us-east-1
+      tofu_version:
+        description: OpenTofu version.
+        required: false
+        type: string
+        default: "1.10.10"
+      tfvars_file:
+        description: Optional tfvars path relative to each stack root.
+        required: false
+        type: string
+        default: ""
+      open_reconcile_pr:
+        description: >-
+          If true, open/update a drift/* stamp PR for create/update-only stacks.
+          Must stay false for prod (report-only).
+        required: false
+        type: boolean
+        default: false
+      reconcile_branch:
+        description: Branch name for stamp PR.
+        required: false
+        type: string
+        default: drift/reconcile
+      base_branch:
+        description: Base branch for stamp PR.
+        required: false
+        type: string
+        default: main
+      exclude:
+        description: Expected-drift exclude patterns (newline/comma or JSON array).
+        required: false
+        type: string
+        default: ""
+      max_workers:
+        description: Parallel plan workers.
+        required: false
+        type: number
+        default: 4
+      issue_title:
+        description: GitHub Issue title for the rolling drift report.
+        required: false
+        type: string
+        default: Infrastructure Drift Report
+      control_app_client_id:
+        description: >-
+          GitHub App Client ID used with control_app_private_key to mint a token
+          scoped to modules_git_repository.
+        required: false
+        type: string
+        default: ""
+      modules_git_repository:
+        description: owner/name of private modules repo. Required when minting.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      control_app_private_key:
+        description: GitHub App private key (PEM) for modules mint.
+        required: false
+      modules_git_token:
+        description: Optional PAT fallback for private module download.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    # No Environment gate here (detect/plan only). IAM trust must allow this workflow's OIDC sub
+    # (typically repo:OWNER/infra-<env>:ref:refs/heads/main for schedule on main).
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Resolve actions repository (this workflow)
+        id: actions_repo
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          repo="${WORKFLOW_REF%%/.github/*}"
+          if [[ -z "${repo}" || "${repo}" == "${WORKFLOW_REF}" ]]; then
+            echo "::error::unable to parse actions repository from github.workflow_ref=${WORKFLOW_REF}"
+            exit 1
+          fi
+          echo "repository=${repo}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout drift script from actions repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ steps.actions_repo.outputs.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .gh-platform-actions
+          sparse-checkout: |
+            scripts
+
+      - name: Resolve modules repo scope
+        id: modules-scope
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        env:
+          MODULES_GIT_REPOSITORY: ${{ inputs.modules_git_repository }}
+        run: |
+          set -euo pipefail
+          echo "owner=${MODULES_GIT_REPOSITORY%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${MODULES_GIT_REPOSITORY##*/}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint GitHub App token for modules
+        id: modules-app
+        if: ${{ inputs.control_app_client_id != '' && inputs.modules_git_repository != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.control_app_client_id }}
+          private-key: ${{ secrets.control_app_private_key }}
+          owner: ${{ steps.modules-scope.outputs.owner }}
+          repositories: ${{ steps.modules-scope.outputs.repo }}
+
+      - name: Configure git auth for module download
+        env:
+          MODULES_GIT_TOKEN: ${{ steps.modules-app.outputs.token || secrets.modules_git_token }}
+        run: |
+          set -euo pipefail
+          token="${MODULES_GIT_TOKEN:-}"
+          if [[ -z "${token}" ]]; then
+            echo "WARN: no modules token (App mint or modules_git_token) — private git modules will fail to download"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${token}@github.com/".insteadOf "git@github.com:"
+          echo "Configured git HTTPS rewrite for module download"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: Run drift reconcile
+        id: drift
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          OPEN_PR: ${{ inputs.open_reconcile_pr }}
+          STACKS_ROOT: ${{ inputs.stacks_root }}
+          TFVARS_FILE: ${{ inputs.tfvars_file }}
+          EXCLUDE: ${{ inputs.exclude }}
+          MAX_WORKERS: ${{ inputs.max_workers }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          RECONCILE_BRANCH: ${{ inputs.reconcile_branch }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          args=(
+            --stacks-root "${STACKS_ROOT}"
+            --repo "${GITHUB_REPOSITORY}"
+            --token "${GITHUB_TOKEN}"
+            --run-url "${run_url}"
+            --report-path drift-report.md
+            --issue-title "${ISSUE_TITLE}"
+            --reconcile-branch "${RECONCILE_BRANCH}"
+            --base-branch "${BASE_BRANCH}"
+            --max-workers "${MAX_WORKERS}"
+          )
+          if [[ -n "${TFVARS_FILE}" ]]; then
+            args+=(--tfvars-file "${TFVARS_FILE}")
+          fi
+          if [[ -n "${EXCLUDE}" ]]; then
+            args+=(--exclude "${EXCLUDE}")
+          fi
+          if [[ "${OPEN_PR}" == "true" ]]; then
+            args+=(--open-reconcile-pr)
+          fi
+          set +e
+          python3 -u .gh-platform-actions/scripts/drift_reconcile.py "${args[@]}"
+          code=$?
+          set -e
+          echo "exit_code=${code}" >> "${GITHUB_OUTPUT}"
+          if [[ "${code}" -eq 1 ]]; then
+            echo "::error::drift reconcile failed (errors during plan/API)"
+            exit 1
+          fi
+          # 0 clean, 2 drift — both are successful detector runs
+          exit 0
+
+      - name: Upload drift report
+        if: always() && hashFiles('drift-report.md') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: drift-report
+          path: drift-report.md
+          if-no-files-found: ignore
+          retention-days: 14
