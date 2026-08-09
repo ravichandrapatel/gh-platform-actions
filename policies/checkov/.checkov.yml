@@ -1,0 +1,15 @@
+# FILE_NAME: .checkov.yml
+# DESCRIPTION: Baseline Checkov config for tofu-pipeline validate scans.
+# VERSION: 0.1.0
+framework:
+  - terraform
+
+# Quiet noise that is covered by Conftest/tfsec or intentional platform patterns.
+skip-check:
+  # Caller workloads often use REPLACE_ACCOUNT_ID / demo placeholders until AWS is wired.
+  - CKV_AWS_18   # S3 access logging (optional at demo stage; Conftest tags still apply)
+  - CKV2_AWS_6   # S3 public access block — golden modules already set this; skip module noise
+
+compact: true
+download-external-modules: false
+evaluate-variables: true

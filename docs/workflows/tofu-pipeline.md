@@ -6,8 +6,8 @@ Secure multi-stage OpenTofu delivery pipeline for caller repositories.
 
 | Job | When | What |
 | --- | --- | --- |
-| `validate` | always | `tofu fmt -check` → `tofu init -backend=false` (module/provider download) → `tofu validate` → **Checkov** |
-| `plan` | after validate | AWS OIDC → `tofu init` → `tofu plan` → **Conftest/OPA** on `tfplan.json` → upload plan artifact |
+| `validate` | always | `tofu fmt -check` → `tofu init -backend=false` → `tofu validate` → **Checkov** (+ `policies/checkov/.checkov.yml`) → **tfsec** |
+| `plan` | after validate | AWS OIDC → `tofu init` → `tofu plan` → **Conftest/OPA** on `tfplan.json` → **C3X** cost summary (job summary) → upload plan artifact |
 | `apply` | `command=apply` + `confirm_apply=APPLY` | GitHub **Environment** gate → download plan → `tofu apply` |
 | `destroy` | `command=destroy` + `confirm_apply=APPLY` | Environment gate → `tofu destroy` (no plan artifact) |
 
@@ -88,3 +88,18 @@ Rego pack: [`policies/conftest/terraform/`](../../policies/conftest/terraform/) 
 See [`policies/conftest/terraform/README.md`](../../policies/conftest/terraform/README.md) and [MODULE_COVERAGE.md](../../policies/conftest/terraform/MODULE_COVERAGE.md).
 
 Override with input `policy_path` (still resolved inside this actions repo checkout).
+
+Checkov baseline: [`policies/checkov/.checkov.yml`](../../policies/checkov/.checkov.yml).
+
+## Security scanners (validate)
+
+| Tool | How | Soft-fail input |
+| --- | --- | --- |
+| Checkov | `bridgecrewio/checkov-action` + checkov.yml | `checkov_soft_fail` (default false) |
+| tfsec | composite [`actions/security/tfsec`](../../actions/security/tfsec/) | `tfsec_soft_fail` (default false) |
+
+## Cost estimate (plan summary)
+
+[C3X](https://github.com/c3xdev/c3x) (Apache-2.0) estimates monthly cost from `tfplan.json` with **no API key**. Output is written to the GitHub Actions **job summary**.
+
+Composite: [`actions/cost/c3x-summary`](../../actions/cost/c3x-summary/). Soft-fail by default (`c3x_soft_fail: true`) so pricing/network issues do not block the plan.

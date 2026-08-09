@@ -15,10 +15,13 @@ Primary deliverable: **`tofu-pipeline`** — multi-stage **validate → plan+OPA
 ## Layout
 
 ```text
-.github/workflows/tofu-pipeline.yml   # reusable: validate → plan+OPA → gated apply
+.github/workflows/tofu-pipeline.yml   # reusable: validate → plan+OPA+C3X → gated apply
 .github/workflows/drift-reconcile.yml # reusable: drift report (+ stamp PR when safe)
 policies/conftest/terraform/          # OPA/Conftest pack for all gh-platform-modules resources
+policies/checkov/                     # Checkov baseline for validate
 actions/security/guard-new-stacks/    # composite: refuse DIY new stacks/*
+actions/security/tfsec/               # composite: pinned tfsec
+actions/cost/c3x-summary/             # composite: C3X cost → job summary (no API key)
 docs/                                 # branching, rulesets, workflow docs
 ```
 
@@ -28,8 +31,8 @@ Policy details: [policies/conftest/terraform/README.md](policies/conftest/terraf
 
 | Stage | Job | Contents |
 | --- | --- | --- |
-| 1 | `validate` | `tofu fmt -check`, `tofu validate` (after module download), Checkov |
-| 2 | `plan` | `tofu plan` + Conftest/OPA |
+| 1 | `validate` | `tofu fmt -check`, `tofu validate` (after module download), Checkov, tfsec |
+| 2 | `plan` | `tofu plan` + Conftest/OPA + C3X cost (job summary) |
 | 3 | `apply` | Environment-gated `tofu apply` (plan artifact) |
 
 Pass `secrets.modules_git_token` so private modules can be downloaded during `tofu init`.

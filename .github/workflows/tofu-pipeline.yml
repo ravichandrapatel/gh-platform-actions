@@ -1,6 +1,6 @@
 # FILE_NAME: tofu-pipeline.yml
-# DESCRIPTION: Multi-stage reusable OpenTofu pipeline — validate → plan+OPA → gated apply.
-# VERSION: 0.3.0
+# DESCRIPTION: Multi-stage reusable OpenTofu pipeline — validate → plan+OPA+cost → gated apply.
+# VERSION: 0.4.0
 # AUTHORS: gh-platform
 
 name: tofu-pipeline
@@ -51,6 +51,16 @@ on:
         required: false
         type: boolean
         default: false
+      tfsec_soft_fail:
+        description: If true, tfsec findings do not fail the job.
+        required: false
+        type: boolean
+        default: false
+      c3x_soft_fail:
+        description: If true, C3X cost estimation failures do not fail the plan job.
+        required: false
+        type: boolean
+        default: true
       conftest_version:
         description: Conftest release version (without leading v).
         required: false
@@ -92,7 +102,7 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Stage 1 — validate: fmt, init (modules/providers), validate, Checkov
+  # Stage 1 — validate: fmt, init, validate, Checkov, tfsec
   # ---------------------------------------------------------------------------
   validate:
     runs-on: ubuntu-latest
@@ -102,6 +112,29 @@ jobs:
     steps:
       - name: Checkout caller repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve policy / actions pack repository
+        id: policy_repo
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          repo="${WORKFLOW_REF%%/.github/*}"
+          if [[ -z "${repo}" || "${repo}" == "${WORKFLOW_REF}" ]]; then
+            echo "::error::unable to parse actions repository from github.workflow_ref=${WORKFLOW_REF}"
+            exit 1
+          fi
+          echo "repository=${repo}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout policy pack + composites (this actions repo)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.policy_repo.outputs.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .gh-platform-actions
+          sparse-checkout: |
+            policies
+            actions
 
       - name: Resolve modules repo scope
         id: modules-scope
@@ -171,10 +204,17 @@ jobs:
           directory: ${{ inputs.working_directory }}
           framework: terraform
           soft_fail: ${{ inputs.checkov_soft_fail }}
+          config_file: .gh-platform-actions/policies/checkov/.checkov.yml
           output_format: cli
 
+      - name: tfsec (Terraform/OpenTofu)
+        uses: ./.gh-platform-actions/actions/security/tfsec
+        with:
+          directory: ${{ inputs.working_directory }}
+          soft_fail: ${{ inputs.tfsec_soft_fail }}
+
   # ---------------------------------------------------------------------------
-  # Stage 2 — plan: full init, plan, Conftest/OPA on plan JSON
+  # Stage 2 — plan: full init, plan, Conftest/OPA, C3X cost summary
   # ---------------------------------------------------------------------------
   plan:
     needs: validate
@@ -235,7 +275,7 @@ jobs:
           fi
           echo "repository=${repo}" >> "${GITHUB_OUTPUT}"
 
-      - name: Checkout policy pack (this actions repo)
+      - name: Checkout policy pack + composites (this actions repo)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.policy_repo.outputs.repository }}
@@ -243,6 +283,7 @@ jobs:
           path: .gh-platform-actions
           sparse-checkout: |
             policies
+            actions
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -321,6 +362,13 @@ jobs:
             exit 1
           fi
           conftest test tfplan.json -p "${policy_dir}" --all-namespaces
+
+      - name: C3X cost summary (job summary)
+        uses: ./.gh-platform-actions/actions/cost/c3x-summary
+        with:
+          plan_path: ${{ inputs.working_directory }}/tfplan.json
+          region: ${{ inputs.aws_region }}
+          soft_fail: ${{ inputs.c3x_soft_fail }}
 
       - name: Upload plan artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

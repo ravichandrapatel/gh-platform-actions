@@ -1,0 +1,67 @@
+# FILE_NAME: action.yml
+# DESCRIPTION: Composite — pinned tfsec scan of a Terraform/OpenTofu directory.
+# VERSION: 0.1.0
+name: tfsec
+description: >-
+  Install pinned aquasecurity/tfsec and scan a Terraform/OpenTofu directory.
+  Complements Checkov (validate stage).
+
+inputs:
+  directory:
+    description: Directory containing .tf / OpenTofu roots.
+    required: true
+  version:
+    description: tfsec release version without leading v (must match sha256).
+    required: false
+    default: "1.28.14"
+  sha256:
+    description: SHA256 of tfsec_<version>_linux_amd64.tar.gz
+    required: false
+    default: "329ae7f67f2f1813ebe08de498719ea7003c75d3ca24bb0b038369062508008e"
+  soft_fail:
+    description: If true, findings do not fail the job.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install tfsec (checksum-verified)
+      shell: bash
+      env:
+        TFSEC_VERSION: ${{ inputs.version }}
+        TFSEC_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        asset="tfsec_${TFSEC_VERSION}_linux_amd64.tar.gz"
+        url="https://github.com/aquasecurity/tfsec/releases/download/v${TFSEC_VERSION}/${asset}"
+        curl -fsSL --retry 3 -o "/tmp/${asset}" "${url}"
+        echo "${TFSEC_SHA256}  /tmp/${asset}" | sha256sum -c -
+        tar -xzf "/tmp/${asset}" -C /tmp tfsec
+        sudo install -m 0755 /tmp/tfsec /usr/local/bin/tfsec
+        tfsec --version
+
+    - name: Run tfsec
+      shell: bash
+      env:
+        DIRECTORY: ${{ inputs.directory }}
+        SOFT_FAIL: ${{ inputs.soft_fail }}
+      run: |
+        set -euo pipefail
+        args=(--no-color "${DIRECTORY}")
+        set +e
+        out="$(tfsec "${args[@]}" 2>&1)"
+        rc=$?
+        set -e
+        echo "${out}"
+        {
+          echo "## tfsec"
+          echo ""
+          echo '```'
+          echo "${out}"
+          echo '```'
+          echo ""
+        } >> "${GITHUB_STEP_SUMMARY}"
+        if [[ "${rc}" -ne 0 && "${SOFT_FAIL}" != "true" ]]; then
+          exit "${rc}"
+        fi
