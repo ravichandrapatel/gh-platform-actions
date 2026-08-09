@@ -1,6 +1,6 @@
 # FILE_NAME: data_messaging.rego
 # DESCRIPTION: Secrets Manager, SNS, SES, EventBridge, GuardDuty baselines.
-# VERSION: 0.2.0
+# VERSION: 0.2.1
 # AUTHORS: gh-platform
 
 package terraform.data
@@ -29,6 +29,18 @@ deny contains msg if {
 	is_string(ss)
 	startswith(ss, "-----BEGIN")
 	msg := sprintf("%s embeds a PEM blob in plan — inject via CI secret / SSM, not VCS", [rc.address])
+}
+
+# Production secrets must keep a recovery window (forbid force-delete / 0-day recovery)
+deny contains msg if {
+	some rc in input.resource_changes
+	rc.type == "aws_secretsmanager_secret"
+	util.is_create_or_update(rc)
+	tags := util.tags_of(rc)
+	lower(object.get(tags, "Environment", "")) in {"prod", "production", "prd"}
+	rw := object.get(util.after(rc), "recovery_window_in_days", 30)
+	to_number(rw) == 0
+	msg := sprintf("%s production secret must not set recovery_window_in_days=0", [rc.address])
 }
 
 # SNS: encryption required in production

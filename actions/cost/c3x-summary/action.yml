@@ -1,0 +1,94 @@
+# FILE_NAME: action.yml
+# DESCRIPTION: Composite — C3X cost estimate from plan JSON into the job summary.
+# VERSION: 0.1.0
+name: C3X plan cost summary
+description: >-
+  Install pinned C3X (no API key) and write a monthly cost breakdown for a
+  Terraform/OpenTofu plan JSON into the GitHub Actions job summary.
+
+inputs:
+  plan_path:
+    description: Path to tfplan.json (relative to workspace or absolute).
+    required: true
+  region:
+    description: Default AWS region when the plan does not declare one.
+    required: false
+    default: us-east-1
+  version:
+    description: C3X release version without leading v (must match sha256).
+    required: false
+    default: "0.2.1"
+  sha256:
+    description: SHA256 of c3x_<version>_linux_amd64.tar.gz
+    required: false
+    default: "9daf05a9dcd5e4a4ef907eb9b5bbf46b20836e4e55dc54bbb0f5f3466c493ad0"
+  soft_fail:
+    description: If true, estimation failures do not fail the job.
+    required: false
+    default: "true"
+  show_delta:
+    description: Prefer plan create/update/delete cost delta when available.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install C3X (checksum-verified)
+      shell: bash
+      env:
+        C3X_VERSION: ${{ inputs.version }}
+        C3X_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        asset="c3x_${C3X_VERSION}_linux_amd64.tar.gz"
+        url="https://github.com/c3xdev/c3x/releases/download/v${C3X_VERSION}/${asset}"
+        curl -fsSL --retry 3 -o "/tmp/${asset}" "${url}"
+        echo "${C3X_SHA256}  /tmp/${asset}" | sha256sum -c -
+        tar -xzf "/tmp/${asset}" -C /tmp c3x
+        sudo install -m 0755 /tmp/c3x /usr/local/bin/c3x
+        c3x version
+
+    - name: Estimate cost and write job summary
+      shell: bash
+      env:
+        PLAN_PATH: ${{ inputs.plan_path }}
+        AWS_REGION: ${{ inputs.region }}
+        SOFT_FAIL: ${{ inputs.soft_fail }}
+        SHOW_DELTA: ${{ inputs.show_delta }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f "${PLAN_PATH}" ]]; then
+          echo "::error::plan JSON not found: ${PLAN_PATH}"
+          if [[ "${SOFT_FAIL}" == "true" ]]; then
+            exit 0
+          fi
+          exit 1
+        fi
+
+        args=(estimate --path "${PLAN_PATH}" --format markdown --region "${AWS_REGION}" --show-skipped)
+        if [[ "${SHOW_DELTA}" == "true" ]]; then
+          args+=(--show-delta)
+        fi
+
+        set +e
+        out="$(c3x "${args[@]}" 2>&1)"
+        rc=$?
+        set -e
+
+        {
+          echo "## Infrastructure cost estimate (C3X)"
+          echo ""
+          echo "_Open-source estimate via [C3X](https://github.com/c3xdev/c3x) — no API key. Prices from pricing.c3x.dev (anonymous)._"
+          echo ""
+          if [[ "${rc}" -ne 0 ]]; then
+            echo "> Estimation exited ${rc}. Output below may be partial."
+            echo ""
+          fi
+          echo "${out}"
+          echo ""
+        } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+        if [[ "${rc}" -ne 0 && "${SOFT_FAIL}" != "true" ]]; then
+          exit "${rc}"
+        fi
