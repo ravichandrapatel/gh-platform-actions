@@ -1,0 +1,54 @@
+# FILE_NAME: action.yml
+# DESCRIPTION: Composite — refuse DIY new stacks/*; allow only control App IssueOps.
+# VERSION: 0.1.0
+name: Guard new stacks
+description: >-
+  Fail pull requests that add new stacks/* directories unless the head branch is
+  issueops/<stack_id>, the actor is a GitHub App bot, and stack-metadata.json
+  is valid. Day-2 edits to existing stacks pass.
+
+inputs:
+  base_ref:
+    description: Git ref for PR base (e.g. origin/main)
+    required: true
+  head_ref_name:
+    description: PR head branch name (github.head_ref)
+    required: true
+  actor:
+    description: github.actor — must end with [bot] when creating new stacks
+    required: true
+  base_branch:
+    description: >-
+      Branch name to fetch before comparing (e.g. main). Defaults to the
+      portion of base_ref after origin/.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure base ref is available
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base_ref }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
+      run: |
+        set -euo pipefail
+        branch="${BASE_BRANCH}"
+        if [[ -z "${branch}" ]]; then
+          branch="${BASE_REF#origin/}"
+        fi
+        git fetch origin "${branch}" --depth=1 || true
+
+    - name: Check new stacks require IssueOps
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base_ref }}
+        HEAD_REF_NAME: ${{ inputs.head_ref_name }}
+        ACTOR: ${{ inputs.actor }}
+      run: |
+        set -euo pipefail
+        python3 "${{ github.action_path }}/check_new_stacks.py" \
+          --base-ref "${BASE_REF}" \
+          --head-ref-name "${HEAD_REF_NAME}" \
+          --actor "${ACTOR}"

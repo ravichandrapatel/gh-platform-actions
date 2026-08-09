@@ -16,8 +16,9 @@ Primary deliverable: **`tofu-pipeline`** — multi-stage **validate → plan+OPA
 
 ```text
 .github/workflows/tofu-pipeline.yml   # reusable: validate → plan+OPA → gated apply
+.github/workflows/drift-reconcile.yml # reusable: drift report (+ stamp PR when safe)
 policies/conftest/terraform/          # OPA/Conftest pack for all gh-platform-modules resources
-actions/                              # reserved for future composite actions
+actions/security/guard-new-stacks/    # composite: refuse DIY new stacks/*
 docs/                                 # branching, rulesets, workflow docs
 ```
 
@@ -51,6 +52,24 @@ jobs:
     secrets:
       modules_git_token: ${{ secrets.MODULES_GIT_TOKEN }}
 ```
+
+## Composite: guard-new-stacks
+
+Workload `tofu.yml` keeps a job named **`guard-new-stacks`** (ruleset required check) and calls:
+
+```yaml
+- uses: ravichandrapatel/gh-platform-actions/actions/security/guard-new-stacks@<40-char-sha>
+  with:
+    base_ref: origin/${{ github.base_ref }}
+    head_ref_name: ${{ github.head_ref }}
+    actor: ${{ github.actor }}
+```
+
+See [actions/security/guard-new-stacks/readme.md](actions/security/guard-new-stacks/readme.md).
+
+## Reusable: drift-reconcile
+
+See [docs/workflows/drift-reconcile.md](docs/workflows/drift-reconcile.md). Callers pin the same SHA as `tofu-pipeline`.
 
 ## Security branching
 
