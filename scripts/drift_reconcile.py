@@ -3,7 +3,7 @@
 FILE_NAME: drift_reconcile.py
 DESCRIPTION: Detect OpenTofu drift across stacks/**; classify destroy vs safe;
   upsert one Drift Report issue; optionally open a stamp PR for create/update-only.
-VERSION: 0.1.0
+VERSION: 0.1.1
 EXIT_CODES: 0 = clean, 1 = error, 2 = drift (safe and/or destroy)
 AUTHORS: gh-platform
 """
@@ -14,8 +14,10 @@ import argparse
 import base64
 import json
 import os
+import random
 import subprocess  # nosec B404 — list-arg invocations only
 import sys
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,12 +52,44 @@ class GitHubApiError(Exception):
         super().__init__(f"HTTP {code}: {body[:300]}")
 
 
-class GitHubApiClient:
-    """ROLE: Service. INTENT: Minimal GitHub REST client (stdlib)."""
+def _retry_after_seconds(err: urllib.error.HTTPError, attempt: int) -> float:
+    """INTENT: Sleep duration for rate-limit retry. INPUT: error + attempt. OUTPUT: seconds."""
+    raw = err.headers.get("Retry-After") if err.headers else None
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return min(60.0, (2**attempt) + random.uniform(0.0, 1.0))
 
-    def __init__(self, token: str, api_url: Optional[str] = None) -> None:
+
+def _is_rate_limited(code: int, body: str) -> bool:
+    """INTENT: Detect 429 / secondary rate limit. INPUT: status + body. OUTPUT: bool."""
+    if code == 429:
+        return True
+    if code != 403:
+        return False
+    lowered = body.lower()
+    return (
+        "rate limit" in lowered
+        or "secondary rate limit" in lowered
+        or "abuse detection" in lowered
+    )
+
+
+class GitHubApiClient:
+    """ROLE: Service. INTENT: Minimal GitHub REST client (stdlib) with rate-limit retry."""
+
+    def __init__(
+        self,
+        token: str,
+        api_url: Optional[str] = None,
+        *,
+        max_attempts: int = 5,
+    ) -> None:
         self._token = token.strip()
         self._base = (api_url or os.getenv("GITHUB_API_URL", "https://api.github.com")).rstrip("/")
+        self._max_attempts = max(1, max_attempts)
 
     def _request(
         self,
@@ -78,16 +112,26 @@ class GitHubApiClient:
         if data is not None:
             body_bytes = json.dumps(data).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=body_bytes, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw else None
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            if exc.code in ok_codes:
-                return json.loads(body) if body else None
-            raise GitHubApiError(exc.code, body) from exc
+
+        last_body = ""
+        last_code = 0
+        for attempt in range(self._max_attempts):
+            req = urllib.request.Request(url, data=body_bytes, method=method, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
+                    raw = resp.read().decode("utf-8")
+                    return json.loads(raw) if raw else None
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                last_body = body
+                last_code = exc.code
+                if exc.code in ok_codes:
+                    return json.loads(body) if body else None
+                if _is_rate_limited(exc.code, body) and attempt + 1 < self._max_attempts:
+                    time.sleep(_retry_after_seconds(exc, attempt))
+                    continue
+                raise GitHubApiError(exc.code, body) from exc
+        raise GitHubApiError(last_code, last_body)
 
 
 # ---------------------------------------------------------------------------
